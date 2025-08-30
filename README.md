@@ -4,6 +4,9 @@ Resilio Connect Scripts is a set of recipes and solutions for commonly done task
 # Update sync.conf
 This folder contains set of scripts and components necesssary to change your Agent's sync.conf file via Distribution job. Script also restarts agent service if necesary. The script does not care about the folder it runs into.
 
+# Python 3 Resilio ShotGrid Webhooks Inteface
+This folder contains a firebase application that can be used to listen for webhooks triggers from shotgrid and create sync jobs based on Show, Shot and Artist information.
+
 ## Mac Agent Package
 This folder contains scripts and files to create OS X package with sync.conf pre-packaged to automatically connect to selected Management Console.
 
