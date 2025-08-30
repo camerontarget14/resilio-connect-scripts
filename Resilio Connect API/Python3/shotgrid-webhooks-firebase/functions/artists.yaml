@@ -1,0 +1,31 @@
+# File: resilio-connect-scripts/Resilio Connect API/Python3/shotgrid-status-webhooks-firebase/functions/artists.yaml
+artists:
+  Matthew: montana_mac
+  Alex: cloud_linux
+
+locations:
+  montana_mac:
+    agent_id: "AGENT_GUID_FOR_MONTANA_MAC"
+    root: "/Volumes/BAKED"
+    os: "mac"
+  cloud_linux:
+    agent_id: "AGENT_GUID_FOR_CLOUD_LINUX"
+    root: "/mnt/BAKED"
+    os: "linux"
+
+local:
+  agent_id: "AGENT_GUID_FOR_LOCAL_MAC"
+  root: "/Volumes/BAKED"
+  os: "mac"
+
+paths:
+  # REL excludes ${SHOT}; shot folder is appended at the end.
+  relative_vfx: "${SHOW}/2_WORK/1_SEQUENCES/VFX/${SHOT}"
+
+defaults:
+  sync_direction: "bidirectional"
+  profile_id: null # optional (set if for Profiles)
+  priority: "normal" # optional: low|normal|high
+  ignore_patterns:
+    - ".DS_Store"
+    - "Thumbs.db"

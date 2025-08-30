@@ -1,0 +1,5 @@
+functions-framework==3.*
+firebase-functions==0.1.*
+shotgun_api3
+requests
+PyYAML
