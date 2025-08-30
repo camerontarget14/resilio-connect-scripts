@@ -26,8 +26,9 @@ import json
 import argparse
 from typing import Dict, Any, Optional
 
-import requests
 import yaml
+from api import ApiBaseCommands
+from errors import ApiError
 
 
 # ---------- Utilities ----------
@@ -123,39 +124,28 @@ def job_name(shot: str, artist: str, location_key: str) -> str:
     return f"SYNC:{shot}:{artist}:{location_key}"
 
 
-# ---------- API helpers (adjust endpoints/fields to your MC version) ----------
+# ---------- Enhanced API class extending existing base ----------
 
-class ResilioAPI:
+class ResilioSyncAPI(ApiBaseCommands):
     """
-    Thin wrapper over Resilio Management Console API.
-    NOTE: Adjust endpoint paths and payload shapes to match your MC version if needed.
+    Extended Resilio API for sync job operations.
+    Builds on the existing ApiBaseCommands structure.
     """
 
-    def __init__(self, base_url: str, token: str):
-        self.base_url = base_url.rstrip("/")
-        self.session = requests.Session()
-        self.session.headers.update({
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        })
-
-    def _url(self, path: str) -> str:
-        return f"{self.base_url}{path}"
+    def __init__(self, base_url: str, token: str, verify: bool = False):
+        super().__init__(base_url, token, verify)
 
     def find_job_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         """
-        Try a filtered list call. If your MC supports search params differently, adjust here.
+        Find a job by name from the jobs list.
         """
         try:
-            # Placeholder path; in many deployments it's under /api/v2/jobs
-            resp = self.session.get(self._url(f"/api/v2/jobs"), params={"name": name})
-            resp.raise_for_status()
-            jobs = resp.json() or []
+            jobs = self._get_jobs()
             for j in jobs:
                 if j.get("name") == name:
                     return j
             return None
-        except requests.HTTPError as e:
+        except ApiError as e:
             print(f"[WARN] find_job_by_name failed ({e}); continuing as if not found.")
             return None
 
@@ -171,53 +161,118 @@ class ResilioAPI:
                         metadata: Optional[Dict[str, Any]] = None,
                         ignore_patterns: Optional[list] = None) -> Dict[str, Any]:
         """
-        Create a Sync Job. Adjust payload keys to your MC schema if necessary.
+        Create a Sync Job using the existing API structure.
+        For sync jobs, we create groups for source and destination agents.
         """
-        payload: Dict[str, Any] = {
-            "name": name,
-            "type": "sync",
-            "direction": direction,  # "one_way" or "bidirectional" (validate your MC value names)
-            "endpoints": [
+
+        # Create temporary groups for the sync job
+        src_group_name = f"TEMP_SRC_{name}_{src_agent_id}"
+        dst_group_name = f"TEMP_DST_{name}_{dst_agent_id}"
+
+        try:
+            # Create source group
+            src_group_attrs = {
+                'name': src_group_name,
+                'description': f'Temporary source group for sync job {name}',
+                'agents': [{'id': int(src_agent_id)}]
+            }
+            src_group_id = self._create_group(src_group_attrs)
+
+            # Create destination group
+            dst_group_attrs = {
+                'name': dst_group_name,
+                'description': f'Temporary destination group for sync job {name}',
+                'agents': [{'id': int(dst_agent_id)}]
+            }
+            dst_group_id = self._create_group(dst_group_attrs)
+
+            # Determine permissions based on direction
+            if direction == "bidirectional":
+                src_permission = "rw"
+                dst_permission = "rw"
+            else:  # one_way (source to destination)
+                src_permission = "rw"
+                dst_permission = "rw"  # destination needs write to receive files
+
+            # Create the sync job with groups
+            groups_data = [
                 {
-                    "agent_id": src_agent_id,
-                    "path": src_path,
-                    "role": "source"  # some MCs don't use 'role' when direction=bidirectional
+                    'id': src_group_id,
+                    'path': {
+                        'linux': src_path,
+                        'win': src_path,
+                        'osx': src_path
+                    },
+                    'permission': src_permission
                 },
                 {
-                    "agent_id": dst_agent_id,
-                    "path": dst_path,
-                    "role": "destination"
+                    'id': dst_group_id,
+                    'path': {
+                        'linux': dst_path,
+                        'win': dst_path,
+                        'osx': dst_path
+                    },
+                    'permission': dst_permission
                 }
             ]
-        }
 
-        # On some MC versions for bidirectional, you may omit roles and just list two endpoints.
-        # If your MC expects fields like "peers" instead of "endpoints", adjust accordingly.
-        # Also, some expect "paths" nested per endpoint.
+            job_attrs = {
+                'name': name,
+                'type': 'sync',
+                'description': f'Sync job for {metadata.get("show", "")}/{metadata.get("shot", "")} - {metadata.get("artist", "")}',
+                'groups': groups_data
+            }
 
-        if profile_id:
-            payload["profile_id"] = profile_id
-        if priority:
-            payload["priority"] = priority
-        if metadata:
-            payload["metadata"] = metadata
-        if ignore_patterns:
-            payload["ignore_patterns"] = ignore_patterns
+            # Add optional attributes
+            if metadata:
+                job_attrs['metadata'] = metadata
+            if ignore_patterns:
+                job_attrs['ignore_patterns'] = ignore_patterns
 
-        # Placeholder endpoint path:
-        url = self._url("/api/v2/jobs")
-        resp = self.session.post(url, data=json.dumps(payload))
-        resp.raise_for_status()
-        return resp.json()
+            job_id = self._create_job(job_attrs)
 
-    def start_job(self, job_id: str) -> None:
+            return {
+                'id': job_id,
+                'name': name,
+                'src_group_id': src_group_id,
+                'dst_group_id': dst_group_id
+            }
+
+        except ApiError as e:
+            # Clean up any created groups on failure
+            try:
+                if 'src_group_id' in locals():
+                    self._delete_group(src_group_id)
+                if 'dst_group_id' in locals():
+                    self._delete_group(dst_group_id)
+            except ApiError:
+                pass  # Ignore cleanup errors
+            raise e
+
+    def start_job(self, job_id: str) -> int:
         """
-        Start/Run a job. Adjust to your MC's start/run endpoint.
+        Start a job by creating a job run.
+        Returns the job run ID.
         """
-        # Commonly something like: POST /api/v2/jobs/{id}/start
-        url = self._url(f"/api/v2/jobs/{job_id}/start")
-        resp = self.session.post(url)
-        resp.raise_for_status()
+        try:
+            run_attrs = {"job_id": int(job_id)}
+            job_run_id = self._create_job_run(run_attrs)
+            return job_run_id
+        except ApiError as e:
+            raise ApiError(f"Failed to start job {job_id}: {e}")
+
+    def cleanup_temp_groups(self, job_info: Dict[str, Any]):
+        """
+        Clean up temporary groups created for a sync job.
+        Call this if you want to clean up after job completion.
+        """
+        try:
+            if 'src_group_id' in job_info:
+                self._delete_group(job_info['src_group_id'])
+            if 'dst_group_id' in job_info:
+                self._delete_group(job_info['dst_group_id'])
+        except ApiError as e:
+            print(f"[WARN] Failed to clean up temporary groups: {e}")
 
 
 # ---------- Main flow ----------
@@ -282,7 +337,9 @@ def main():
 
     base_url = env_or_die("RESILIO_URL")
     token = env_or_die("RESILIO_TOKEN")
-    api = ResilioAPI(base_url, token)
+
+    # Use the integrated API class
+    api = ResilioSyncAPI(base_url, token, verify=False)
 
     # Idempotency: try to find by name first
     existing = api.find_job_by_name(name)
@@ -291,11 +348,15 @@ def main():
         if not job_id:
             sys.exit("[ERROR] Found job but it has no 'id' field; check API schema.")
         print(f"[INFO] Job already exists: {name} (id={job_id}). Starting it...")
-        api.start_job(job_id)
-        print("[OK] Job started.")
+
+        try:
+            job_run_id = api.start_job(job_id)
+            print(f"[OK] Job started with run ID: {job_run_id}")
+        except ApiError as e:
+            sys.exit(f"[ERROR] Failed to start existing job: {e}")
         return
 
-    # Attach optional metadata to help future automation/waterfall from ShotGrid:
+    # Attach metadata to help future automation/waterfall from ShotGrid
     metadata = {
         "artist": artist,
         "location_key": location_key,
@@ -318,13 +379,8 @@ def main():
             metadata=metadata,
             ignore_patterns=ignore_patterns
         )
-    except requests.HTTPError as e:
-        # Helpful diagnostics
-        try:
-            body = e.response.json()
-        except Exception:
-            body = e.response.text if e.response is not None else "<no response>"
-        sys.exit(f"[ERROR] Create job failed: {e}\nResponse: {body}")
+    except ApiError as e:
+        sys.exit(f"[ERROR] Create job failed: {e}")
 
     job_id = str(created.get("id", "")).strip()
     if not job_id:
@@ -332,15 +388,14 @@ def main():
 
     print(f"[OK] Job created: {name} (id={job_id}). Starting it...")
     try:
-        api.start_job(job_id)
-    except requests.HTTPError as e:
-        try:
-            body = e.response.json()
-        except Exception:
-            body = e.response.text if e.response is not None else "<no response>"
-        sys.exit(f"[ERROR] Start job failed: {e}\nResponse: {body}")
+        job_run_id = api.start_job(job_id)
+        print(f"[OK] Job started with run ID: {job_run_id}")
+    except ApiError as e:
+        sys.exit(f"[ERROR] Start job failed: {e}")
 
-    print("[OK] Job started.")
+    # Optional: Clean up temporary groups after some time
+    # You might want to do this in a separate cleanup script or after job completion
+    # api.cleanup_temp_groups(created)
 
 
 if __name__ == "__main__":
