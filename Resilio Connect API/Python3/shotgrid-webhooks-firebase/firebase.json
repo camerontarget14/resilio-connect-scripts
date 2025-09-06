@@ -29,6 +29,10 @@
       {
         "source": "/webhooks/assignment/task",
         "function": "assignment_webhook"
+      },
+      {
+        "source": "/webhooks/status/shot",
+        "function": "shot_status_webhook"
       }
     ]
   }

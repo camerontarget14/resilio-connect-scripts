@@ -85,7 +85,7 @@ shot_statuses:
     label: Awaiting Media
   - key: awa
     label: Awaiting Assignment
-  - key: actv
+  - key: active
     label: Active
   - key: rev
     label: Pending Client Review
@@ -128,27 +128,27 @@ task_to_shot:
   hld:
     - hld
   rdy:
-    - actv
+    - active
   per:
-    - actv
+    - active
   ip:
-    - actv
+    - active
   ncl:
-    - actv
+    - active
   ofr:
-    - actv
+    - active
   bfr:
-    - actv
+    - active
   cnv:
-    - actv
+    - active
   stcomp:
-    - actv
+    - active
   sndcli:
-    - actv
+    - active
   adn:
-    - actv
+    - active
   qckbk:
-    - actv
+    - active
   rev:
     - rev
   apv:

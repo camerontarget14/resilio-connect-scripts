@@ -1,31 +1,45 @@
-# File: resilio-connect-scripts/Resilio Connect API/Python3/shotgrid-status-webhooks-firebase/functions/artists.yaml
+# Artist configuration for Resilio Connect state synchronization
+# Updated for comprehensive ShotGrid-Resilio sync
+
 artists:
-  Matthew: montana_mac
-  Alex: cloud_linux
+  # Maps ShotGrid artist names to Resilio agent names
+  Matthew: Linux_02
+  Alex: Linux_03
 
-locations:
-  montana_mac:
-    agent_id: "AGENT_GUID_FOR_MONTANA_MAC"
-    root: "/Volumes/BAKED"
-    os: "mac"
-  cloud_linux:
-    agent_id: "AGENT_GUID_FOR_CLOUD_LINUX"
-    root: "/mnt/BAKED"
-    os: "linux"
-
-local:
-  agent_id: "AGENT_GUID_FOR_LOCAL_MAC"
-  root: "/Volumes/BAKED"
-  os: "mac"
-
+# Path templates for hybrid work jobs
 paths:
-  # REL excludes ${SHOT}; shot folder is appended at the end.
-  relative_vfx: "${SHOW}/2_WORK/1_SEQUENCES/VFX/${SHOT}"
+  # Template for shot-specific paths
+  # Tokens: ${PROJECT} = tank_name, ${SEQUENCE} = sequence, ${SHOT} = shot code
+  shots_template: "/Volumes/Company/${PROJECT}/2_WORK/1_SEQUENCES/${SEQUENCE}/${SHOT}"
 
+  # Template for assets paths
+  # Tokens: ${PROJECT} = tank_name
+  assets_template: "/Volumes/Company/${PROJECT}/2_WORK/2_ASSETS"
+
+# Job naming patterns (used for finding/creating jobs)
+job_patterns:
+  # Shot jobs: HybridWork_ArtistName_ProjectTank_ShotName
+  shot_job: "HybridWork_${ARTIST}_${PROJECT}_${SHOT}"
+
+  # Assets jobs: HybridWork_ArtistName_ProjectTank_Assets
+  assets_job: "HybridWork_${ARTIST}_${PROJECT}_Assets"
+
+# Sync settings
+sync_settings:
+  # Only sync shots with this status
+  active_shot_status: "active"
+
+  # Whether to delete jobs for shots that are no longer active
+  cleanup_inactive_jobs: false
+
+  # Maximum files to hydrate per request
+  max_hydrate_files: 1000
+
+# Legacy settings (for backward compatibility)
 defaults:
   sync_direction: "bidirectional"
-  profile_id: null # optional (set if for Profiles)
-  priority: "normal" # optional: low|normal|high
+  profile_id: null
+  priority: "normal"
   ignore_patterns:
     - ".DS_Store"
     - "Thumbs.db"

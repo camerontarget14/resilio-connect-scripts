@@ -1,17 +1,18 @@
 """• ShotGrid webhooks – Firebase Cloud Functions
 ----------------------------------------------------------------
-Exports three HTTP Cloud Functions that preserve legacy URLs while sharing a
-single implementation.
+Exports HTTP Cloud Functions for ShotGrid webhook integration with Resilio state sync.
 
 - task_webhook            – Task status change
 - version_webhook         – Version status change
 - version_created_webhook – Version created
+- assignment_webhook      – Task assignment (legacy)
+- shot_status_webhook     – Shot status change (triggers full sync)
 
 Deploy (Gen‑2):
     firebase deploy --only functions
 """
 from __future__ import annotations
-from resilio_sync import ArtistSyncManager
+from resilio_state_sync import ResilioStateSyncManager, ShotGridStateManager
 import os, json, hmac, hashlib, yaml, logging
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
@@ -51,9 +52,10 @@ SECRET_TOKEN   = _CONF["SECRET_TOKEN"].encode()
 RESILIO_URL = _CONF.get("RESILIO_URL", "")
 RESILIO_TOKEN = _CONF.get("RESILIO_TOKEN", "")
 
-logger.info("Starting ShotGrid webhooks service")
+logger.info("Starting ShotGrid webhooks service with Resilio state sync")
 logger.info(f"Using ShotGrid host: {SG_HOST}")
 logger.info(f"Using script name: {SG_SCRIPT_NAME}")
+
 
 # ─────────────────────────────── Singleton SG client ────────────────────────
 logger.info("Initializing ShotGrid client connection")
@@ -447,13 +449,12 @@ def _handle_version_created(payload: dict):
     }
 
 def _handle_task_assignment(payload: dict):
-    """Handle new task assignment to create Resilio sync job."""
-    logger.info("Task assignment webhook triggered")
+    """Handle new task assignment - simplified version that triggers shot status sync."""
+    logger.info("Task assignment webhook triggered - triggering shot status sync")
     logger.debug(f"Task assignment payload: {json.dumps(payload)}")
 
     try:
         # Extract task information from payload
-        task_data = payload.get("data", {})
         task_id = _entity_id(payload["data"])
 
         if not task_id:
@@ -467,12 +468,6 @@ def _handle_task_assignment(payload: dict):
         if not task:
             logger.error(f"Task {task_id} not found in ShotGrid")
             return {"error": f"Task {task_id} not found"}
-
-        # Extract assignees (users assigned to the task)
-        task_assignees = task.get("task_assignees", [])
-        if not task_assignees:
-            logger.info(f"Task {task_id} has no assignees, skipping sync job creation")
-            return {"message": "No assignees found", "task_id": task_id}
 
         # Get shot information
         entity = task.get("entity")
@@ -488,69 +483,124 @@ def _handle_task_assignment(payload: dict):
             return {"error": f"Shot {shot_id} not found"}
 
         shot_name = shot.get("code", "")
-        project = shot.get("project", {})
-        show = project.get("name", "") if project else ""
+        shot_status = shot.get("sg_status_list", "")
 
-        if not shot_name or not show:
-            logger.error(f"Missing shot name ({shot_name}) or show ({show})")
-            return {"error": "Missing shot name or show information"}
+        # If shot is active, trigger full sync (same as shot status webhook)
+        if shot_status == "active":
+            logger.info(f"Shot {shot_name} is active, triggering full Resilio sync")
 
+            # Validate Resilio configuration
+            if not RESILIO_URL or not RESILIO_TOKEN:
+                logger.error("Resilio Connect credentials not configured")
+                return {"error": "Resilio Connect not configured"}
+
+            # Initialize managers
+            sg_state_manager = ShotGridStateManager(_SG_CLIENT)
+            resilio_sync_manager = ResilioStateSyncManager()
+
+            # Get current ShotGrid state
+            sg_state = sg_state_manager.get_active_shots_with_assignments()
+
+            # Sync Resilio to match ShotGrid state
+            sync_results = resilio_sync_manager.sync_resilio_to_shotgrid_state(
+                sg_state=sg_state,
+                resilio_url=RESILIO_URL,
+                resilio_token=RESILIO_TOKEN
+            )
+
+            logger.info(f"Assignment sync complete: {sync_results['shot_jobs_created']} shot jobs created, "
+                       f"{sync_results['shot_jobs_updated']} updated")
+
+            return {
+                "task_id": task_id,
+                "shot_name": shot_name,
+                "shot_status": shot_status,
+                "trigger_reason": "assignment_to_active_shot",
+                "sync_results": sync_results
+            }
+        else:
+            logger.info(f"Shot {shot_name} status is '{shot_status}', not active - no sync needed")
+            return {
+                "task_id": task_id,
+                "shot_name": shot_name,
+                "shot_status": shot_status,
+                "message": "Shot not active, no sync performed"
+            }
+
+    except Exception as e:
+        logger.error(f"Task assignment webhook failed: {e}")
+        return {"error": f"Webhook processing failed: {str(e)}"}
+
+def _handle_shot_status(payload: dict):
+    """Handle shot status changes and sync Resilio state."""
+    logger.info("Shot status webhook triggered - starting full Resilio sync")
+    logger.debug(f"Shot status payload: {json.dumps(payload)}")
+
+    meta = payload["data"].get("meta", {})
+    attribute_name = meta.get("attribute_name")
+
+    if attribute_name != "sg_status_list":
+        logger.info(f"Ignoring update to attribute '{attribute_name}', only handling sg_status_list")
+        return {"ignored": True, "reason": f"attribute_name is '{attribute_name}', not 'sg_status_list'"}
+
+    shot_id = _entity_id(payload["data"])
+    if shot_id is None:
+        logger.error("Failed to extract shot ID from payload")
+        return {"error": "No shot ID"}
+
+    new_status = meta.get("new_value")
+    old_status = meta.get("old_value")
+    logger.info(f"Shot {shot_id} status changed from '{old_status}' to '{new_status}'")
+
+    try:
         # Validate Resilio configuration
         if not RESILIO_URL or not RESILIO_TOKEN:
             logger.error("Resilio Connect credentials not configured")
             return {"error": "Resilio Connect not configured"}
 
-        # Initialize sync manager
-        sync_manager = ArtistSyncManager()
-        results = []
+        # Initialize managers
+        sg_state_manager = ShotGridStateManager(_SG_CLIENT)
+        resilio_sync_manager = ResilioStateSyncManager()
 
-        # Create sync jobs for each assigned artist
-        for assignee in task_assignees:
-            artist_name = assignee.get("name", "")
-            if not artist_name:
-                logger.warning("Assignee has no name, skipping")
-                continue
+        # Get current ShotGrid state
+        logger.info("Querying current ShotGrid state...")
+        sg_state = sg_state_manager.get_active_shots_with_assignments()
 
-            try:
-                logger.info(f"Creating sync job for Show: {show}, Shot: {shot_name}, Artist: {artist_name}")
+        active_shots_count = len(sg_state['shots'])
+        artists_count = len(sg_state['artist_projects'])
+        logger.info(f"Found {active_shots_count} active shots across {artists_count} artists")
 
-                result = sync_manager.create_artist_sync_job(
-                    show=show,
-                    shot=shot_name,
-                    artist=artist_name,
-                    resilio_url=RESILIO_URL,
-                    resilio_token=RESILIO_TOKEN
-                )
+        # Sync Resilio to match ShotGrid state
+        logger.info("Synchronizing Resilio jobs to match ShotGrid state...")
+        sync_results = resilio_sync_manager.sync_resilio_to_shotgrid_state(
+            sg_state=sg_state,
+            resilio_url=RESILIO_URL,
+            resilio_token=RESILIO_TOKEN
+        )
 
-                results.append(result)
-                logger.info(f"Successfully handled sync job for {artist_name}: {result['status']}")
+        # Log summary
+        logger.info(f"Sync complete: {sync_results['shot_jobs_created']} shot jobs created, "
+                   f"{sync_results['shot_jobs_updated']} updated, "
+                   f"{sync_results['shot_jobs_hydrated']} hydrated, "
+                   f"{sync_results['assets_jobs_created']} assets jobs created, "
+                   f"{sync_results['assets_jobs_updated']} assets updated")
 
-            except ValueError as e:
-                logger.warning(f"Configuration error for artist {artist_name}: {e}")
-                results.append({
-                    "artist": artist_name,
-                    "status": "error",
-                    "error": str(e)
-                })
-            except Exception as e:
-                logger.error(f"Failed to create sync job for artist {artist_name}: {e}")
-                results.append({
-                    "artist": artist_name,
-                    "status": "error",
-                    "error": str(e)
-                })
+        if sync_results['errors']:
+            logger.warning(f"Sync completed with {len(sync_results['errors'])} errors")
+            for error in sync_results['errors']:
+                logger.warning(f"  - {error}")
 
         return {
-            "task_id": task_id,
-            "shot_name": shot_name,
-            "show": show,
-            "assignees_processed": len(task_assignees),
-            "sync_jobs": results
+            "trigger_shot_id": shot_id,
+            "trigger_status_change": f"{old_status} -> {new_status}",
+            "active_shots_found": active_shots_count,
+            "artists_found": artists_count,
+            "sync_results": sync_results
         }
 
     except Exception as e:
-        logger.error(f"Task assignment webhook failed: {e}")
-        return {"error": f"Webhook processing failed: {str(e)}"}
+        logger.error(f"Shot status webhook failed: {e}")
+        return {"error": f"Sync processing failed: {str(e)}"}
 
 
 # ─────────────────────────────── Dispatcher ────────────────────────────────
@@ -587,6 +637,9 @@ def _dispatch(request: Request, route: Optional[str] = None):
     elif key == "assignment":
         logger.info("Handling as assignment webhook")
         result = _handle_task_assignment(payload)
+    elif key in {"shot", "shot_status", "shot-status"}:
+        logger.info("Handling as shot status webhook")
+        result = _handle_shot_status(payload)
     else:
         logger.warning(f"Unknown webhook type: {key}")
         abort(make_response(("Not Found", 404)))
@@ -601,8 +654,9 @@ def _dispatch(request: Request, route: Optional[str] = None):
         except Exception as e:
             logger.warning(f"Bad timestamp '{ts}': {str(e)}")
 
-    logger.info(f"Webhook {key} processing complete: {json.dumps(result)}")
+    logger.info(f"Webhook {key} processing complete")
     return jsonify(result), 200
+
 
 # ─────────────────────────────── Cloud Function exports ────────────────────
 @https_fn.on_request()
@@ -631,3 +685,8 @@ def main(request: Request):
 def assignment_webhook(request: Request):
     """HTTP Cloud Function for task assignment webhooks."""
     return _dispatch(request, "assignment")
+
+@https_fn.on_request()
+def shot_status_webhook(request: Request):
+    """HTTP Cloud Function for shot status webhooks."""
+    return _dispatch(request, "shot_status")
